@@ -1,36 +1,52 @@
 # ml_engine/steps/ingest.py
+"""
+Data Ingestion Module
+---------------------
+Loads raw student & internship CSVs into pandas DataFrames.
 
+Usage:
+    from ingest import load_data
+    students_df, internships_df = load_data(raw_dir="ml_engine/data/raw")
+"""
+
+from pathlib import Path
 import pandas as pd
-import os
+import logging
+from typing import Tuple
 
-RAW_DATA_PATH = os.path.join("ml_engine", "data", "raw")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def load_data():
-    """
-    Load students and internships datasets from raw folder.
-    Returns:
-        students_df (pd.DataFrame)
-        internships_df (pd.DataFrame)
-    """
-    students_file = os.path.join(RAW_DATA_PATH, "students_augmented.csv")
-    internships_file = os.path.join(RAW_DATA_PATH, "internships_augmented.csv")
 
-    if not os.path.exists(students_file):
-        raise FileNotFoundError(f"❌ {students_file} not found")
-    if not os.path.exists(internships_file):
-        raise FileNotFoundError(f"❌ {internships_file} not found")
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    df = pd.read_csv(path)
+    logging.info(f"Loaded {path.name} with shape {df.shape}")
+    return df
 
-    print("📥 Loading raw datasets...")
-    students_df = pd.read_csv(students_file)
-    internships_df = pd.read_csv(internships_file)
 
-    print(f"✅ Students dataset loaded: {students_df.shape}")
-    print(f"✅ Internships dataset loaded: {internships_df.shape}")
+def load_students(file_name: str = "students_.csv", raw_dir: str = "ml_engine/data/raw") -> pd.DataFrame:
+    path = Path(raw_dir) / file_name
+    return _read_csv(path)
 
-    return students_df, internships_df
+
+def load_internships(file_name: str = "internships_.csv", raw_dir: str = "ml_engine/data/raw") -> pd.DataFrame:
+    path = Path(raw_dir) / file_name
+    return _read_csv(path)
+
+
+def load_data(raw_dir: str = "ml_engine/data/raw",
+              students_file: str = "students_.csv",
+              internships_file: str = "internships_.csv") -> Tuple[pd.DataFrame, pd.DataFrame]:
+    students = load_students(students_file, raw_dir)
+    internships = load_internships(internships_file, raw_dir)
+    logging.info(f"Loaded students: {students.shape}, internships: {internships.shape}")
+    return students, internships
 
 
 if __name__ == "__main__":
-    students, internships = load_data()
-    print("🔍 Students Preview:\n", students.head())
-    print("🔍 Internships Preview:\n", internships.head())
+    # quick test run
+    try:
+        load_data()
+    except Exception as e:
+        logging.error(e)
