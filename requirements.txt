@@ -1,0 +1,17 @@
+# Core Data Libraries
+pandas
+numpy
+
+# Visualization
+matplotlib
+seaborn
+
+# ML/Recommendation
+scikit-learn
+
+# API (ML Engine serving ke liye)
+fastapi
+uvicorn
+
+# Notebooks
+jupyter
