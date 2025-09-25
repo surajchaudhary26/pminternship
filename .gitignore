@@ -1,0 +1,12 @@
+# Ignore processed data
+ml_engine/data/processed/*.csv
+
+# Ignore cache
+__pycache__/
+*.pyc
+
+# Ignore notebooks temp
+notebook/*temp*.ipynb
+
+# Ignore virtual environment
+.venv/
