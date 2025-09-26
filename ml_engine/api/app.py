@@ -4,6 +4,7 @@ from typing import List, Optional
 import pandas as pd
 from pathlib import Path
 import ast
+import logging
 
 from ml_engine.steps.featurize import (
     match_students_to_internships,
@@ -12,6 +13,8 @@ from ml_engine.steps.featurize import (
 )
 from ml_engine.steps.ingest import load_data
 from ml_engine.steps.data_cleaning import clean_students, clean_internships
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 app = FastAPI(title="Internship Recommendation API", version="2.0")
 
@@ -22,9 +25,16 @@ internships_clean = clean_internships(internships_raw)
 
 # Load already processed recommendation CSVs (saved by pipeline.py)
 processed_dir = Path("ml_engine/data/processed")
-matches_base = pd.read_csv(processed_dir / "matches.csv")
-matches_gap = pd.read_csv(processed_dir / "matches_with_gaps.csv")
-matches_weighted = pd.read_csv(processed_dir / "matches_weighted.csv")
+
+def safe_read_csv(path: Path):
+    if path.exists():
+        return pd.read_csv(path)
+    logging.warning(f"⚠️ File not found: {path}")
+    return pd.DataFrame()
+
+matches_base = safe_read_csv(processed_dir / "matches.csv")
+matches_gap = safe_read_csv(processed_dir / "matches_with_gaps.csv")
+matches_weighted = safe_read_csv(processed_dir / "matches_weighted.csv")
 
 
 # --- Request Models ---
@@ -50,7 +60,9 @@ def get_match_label(score: float, mode: str = "baseline") -> str:
 # --- Routes ---
 @app.get("/")
 def home():
-    return {"message": "🎓 Internship Recommendation API with Baseline, Gap-Analysis, and Weighted results is running!"}
+    return {
+        "message": "🎓 Internship Recommendation API with Baseline, Gap-Analysis, and Weighted results is running!"
+    }
 
 
 @app.post("/recommend")
@@ -60,47 +72,97 @@ def recommend(data: StudentRequest):
 
     response = {"student_id": sid, "recommendations": {}}
 
+    # -----------------------------
     # Baseline
-    row = matches_base[matches_base["student_id"] == sid]
-    if not row.empty:
-        recs = ast.literal_eval(row.iloc[0]["top_matches"])
-        baseline_recs = [
-            {
-                "job_id": jid,
-                "score": round(score, 4),
-                "label": get_match_label(score, "baseline"),
-            }
-            for jid, score in recs[:top_n]
-        ]
-        response["recommendations"]["baseline"] = baseline_recs
-
-    # Gap-Analysis
-    gap_recs = matches_gap[matches_gap["student_id"] == sid].head(top_n)
-    if not gap_recs.empty:
-        gap_list = []
-        for _, r in gap_recs.iterrows():
-            gap_list.append(
+    # -----------------------------
+    if not matches_base.empty:
+        row = matches_base[matches_base["student_id"] == sid]
+        if not row.empty:
+            try:
+                recs = ast.literal_eval(str(row.iloc[0]["top_matches"]))
+            except Exception as e:
+                logging.error(f"Baseline parse error for {sid}: {e}")
+                recs = []
+            baseline_recs = [
                 {
-                    "job_id": r["job_id"],
-                    "score": round(r["score"], 4),
-                    "missing_skills": r["missing_skills"].split(";") if isinstance(r["missing_skills"], str) else [],
-                    "missing_pct": r["missing_pct"],
+                    "job_id": jid,
+                    "score": round(float(score), 4),
+                    "label": get_match_label(float(score), "baseline"),
                 }
-            )
-        response["recommendations"]["gap_analysis"] = gap_list
+                for jid, score in recs[:top_n]
+            ]
+            response["recommendations"]["baseline"] = baseline_recs
 
+    # -----------------------------
+    # Gap-Analysis
+    # -----------------------------
+    if not matches_gap.empty and "student_id" in matches_gap.columns:
+        gap_recs = matches_gap[matches_gap["student_id"] == sid].head(top_n)
+        if not gap_recs.empty:
+            gap_list = []
+            for _, r in gap_recs.iterrows():
+                gap_list.append(
+                    {
+                        "job_id": r.get("job_id", ""),
+                        "score": round(float(r.get("score", 0.0)), 4),
+                        "missing_skills": (
+                            r.get("missing_skills", "").split(";")
+                            if isinstance(r.get("missing_skills"), str)
+                            else []
+                        ),
+                        "missing_pct": float(r.get("missing_pct", 0.0)),
+                    }
+                )
+            response["recommendations"]["gap_analysis"] = gap_list
+
+    # -----------------------------
     # Weighted
-    row_w = matches_weighted[matches_weighted["student_id"] == sid]
-    if not row_w.empty:
-        recs = ast.literal_eval(row_w.iloc[0]["top_matches"])
-        weighted_recs = [
-            {
-                "job_id": jid,
-                "score": round(score, 4),
-                "label": get_match_label(score, "weighted"),
-            }
-            for jid, score in recs[:top_n]
-        ]
-        response["recommendations"]["weighted"] = weighted_recs
+    # -----------------------------
+    if not matches_weighted.empty:
+        row_w = matches_weighted[matches_weighted["student_id"] == sid]
+        if not row_w.empty:
+            try:
+                recs = ast.literal_eval(str(row_w.iloc[0]["top_matches"]))
+            except Exception as e:
+                logging.error(f"Weighted parse error for {sid}: {e}")
+                recs = []
+            weighted_recs = [
+                {
+                    "job_id": jid,
+                    "score": round(float(score), 4),
+                    "label": get_match_label(float(score), "weighted"),
+                }
+                for jid, score in recs[:top_n]
+            ]
+            response["recommendations"]["weighted"] = weighted_recs
 
     return response
+
+@app.get("/check/{student_id}")
+def check_student(student_id: str):
+    result = {"student_id": student_id, "exists_in": {}}
+
+    try:
+        # Baseline check
+        if not matches_base.empty and "student_id" in matches_base.columns:
+            result["exists_in"]["baseline"] = (matches_base["student_id"] == student_id).any()
+        else:
+            result["exists_in"]["baseline"] = False
+
+        # Gap-analysis check
+        if not matches_gap.empty and "student_id" in matches_gap.columns:
+            result["exists_in"]["gap_analysis"] = (matches_gap["student_id"] == student_id).any()
+        else:
+            result["exists_in"]["gap_analysis"] = False
+
+        # Weighted check
+        if not matches_weighted.empty and "student_id" in matches_weighted.columns:
+            result["exists_in"]["weighted"] = (matches_weighted["student_id"] == student_id).any()
+        else:
+            result["exists_in"]["weighted"] = False
+
+    except Exception as e:
+        logging.error(f"❌ Error in /check/{student_id}: {e}")
+        return {"error": str(e)}
+
+    return result
