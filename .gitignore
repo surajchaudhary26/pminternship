@@ -1,12 +1,23 @@
-# Ignore processed data
-ml_engine/data/processed/*.csv
-
-# Ignore cache
+# Python
 __pycache__/
 *.pyc
 
-# Ignore notebooks temp
-notebook/*temp*.ipynb
-
-# Ignore virtual environment
+# Virtual env
 .venv/
+
+# MacOS
+.DS_Store
+
+# Logs
+*.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Data (ignore large datasets)
+ml_engine/data/raw/
+ml_engine/data/cleaned/
+ml_engine/data/processed/
+
+# Old configs
+ml_engine/configs/
