@@ -1,15 +1,12 @@
 # ml_engine/steps/augment.py
 """
-Data Augmentation Module (merged)
----------------------------------
-Contains several augmentation utilities:
-- rebalance_students: boost under-represented skills or resample
-- rebalance_internships: introduce controlled missingness or perturbation
-- random_missing: create missingness for robustness testing
-- augment_skills: inject synthetic skills (from pools) into skills lists
-
-Functions accept DataFrame OR file paths and return DataFrame (and optionally save to disk).
-CLI available for quick runs.
+Data Augmentation Module (with seed + pd.NA fix)
+------------------------------------------------
+Contains augmentation utilities with reproducibility:
+- rebalance_students
+- rebalance_internships
+- random_missing
+- augment_skills
 """
 
 from pathlib import Path
@@ -17,6 +14,7 @@ import pandas as pd
 import random
 import logging
 import argparse
+import numpy as np
 from typing import Optional, List, Union
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -32,7 +30,7 @@ def _ensure_list_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
     if col not in df.columns:
         df[col] = [[] for _ in range(len(df))]
         return df
-    # if it's stored as string, try to parse common formats: assume cleaned step already handled, but safe-check:
+
     def _to_list(x):
         if isinstance(x, list):
             return x
@@ -46,7 +44,6 @@ def _ensure_list_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
                     parsed = ast.literal_eval(s)
                     return list(parsed) if isinstance(parsed, (list, tuple)) else [s]
                 except Exception:
-                    # fallback CSV-split
                     return [p.strip() for p in s.split(",") if p.strip()]
             if "," in s:
                 return [p.strip() for p in s.split(",") if p.strip()]
@@ -63,15 +60,15 @@ def rebalance_students(df: Optional[pd.DataFrame] = None,
                        input_path: Optional[Union[str, Path]] = None,
                        output_path: Optional[Union[str, Path]] = None,
                        boost_low_freq_prob: float = 0.1,
-                       low_skill_pool: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Boost low-frequency skills by injecting one low-frequency skill into a
-    random subset of students. Return updated DataFrame (and save if output_path provided).
-    """
+                       low_skill_pool: Optional[List[str]] = None,
+                       seed: Optional[int] = None) -> pd.DataFrame:
     if df is None:
         if input_path is None:
             raise ValueError("Either df or input_path must be provided")
         df = pd.read_csv(input_path)
+
+    if seed is not None:
+        random.seed(seed)
 
     df = df.copy()
     df = _ensure_list_col(df, "skills")
@@ -97,28 +94,29 @@ def rebalance_students(df: Optional[pd.DataFrame] = None,
 
 
 # -----------------------------
-# 2) Rebalance internships (missingness / perturbation)
+# 2) Rebalance internships
 # -----------------------------
 def rebalance_internships(df: Optional[pd.DataFrame] = None,
                           input_path: Optional[Union[str, Path]] = None,
                           output_path: Optional[Union[str, Path]] = None,
                           missing_frac: float = 0.05,
-                          target_cols: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Introduce missingness/perturbations in selected columns for internships.
-    """
+                          target_cols: Optional[List[str]] = None,
+                          seed: Optional[int] = None) -> pd.DataFrame:
     if df is None:
         if input_path is None:
             raise ValueError("Either df or input_path must be provided")
         df = pd.read_csv(input_path)
+
+    if seed is not None:
+        np.random.seed(seed)
 
     df = df.copy()
     if target_cols is None:
         target_cols = [c for c in ["sector", "qualification_required", "skills_required", "description"] if c in df.columns]
 
     for col in target_cols:
-        idx = df.sample(frac=missing_frac, random_state=None).index
-        df.loc[idx, col] = None
+        idx = df.sample(frac=missing_frac, random_state=seed).index
+        df.loc[idx, col] = pd.NA   # ✅ FIXED (no more warning)
 
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -129,28 +127,32 @@ def rebalance_internships(df: Optional[pd.DataFrame] = None,
 
 
 # -----------------------------
-# 3) Random Missingness (generic)
+# 3) Random Missingness
 # -----------------------------
 def random_missing(df: Optional[pd.DataFrame] = None,
                    input_path: Optional[Union[str, Path]] = None,
                    output_path: Optional[Union[str, Path]] = None,
                    frac: float = 0.1,
-                   target_cols: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Introduce random missing values across given columns (students or internships).
-    """
+                   target_cols: Optional[List[str]] = None,
+                   seed: Optional[int] = None) -> pd.DataFrame:
     if df is None:
         if input_path is None:
             raise ValueError("Provide df or input_path")
         df = pd.read_csv(input_path)
+
+    if seed is not None:
+        np.random.seed(seed)
 
     df = df.copy()
     if target_cols is None:
         target_cols = list(df.columns)
 
     for col in target_cols:
-        idx = df.sample(frac=frac).index
-        df.loc[idx, col] = None
+        idx = df.sample(frac=frac, random_state=seed).index
+        df[col] = df[col].astype("object")
+        df.loc[idx, col] = pd.NA
+
+        # df.loc[idx, col] = pd.NA   # ✅ FIXED
 
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -161,26 +163,28 @@ def random_missing(df: Optional[pd.DataFrame] = None,
 
 
 # -----------------------------
-# 4) Augment skills (inject synthetic skills)
+# 4) Augment skills
 # -----------------------------
 def augment_skills(df: Optional[pd.DataFrame] = None,
                    input_path: Optional[Union[str, Path]] = None,
                    output_path: Optional[Union[str, Path]] = None,
                    add_prob: float = 0.25,
-                   extra_pool: Optional[List[str]] = None) -> pd.DataFrame:
-    """
-    Inject additional skills into students' skills lists with probability add_prob.
-    """
+                   extra_pool: Optional[List[str]] = None,
+                   seed: Optional[int] = None) -> pd.DataFrame:
     if df is None:
         if input_path is None:
             raise ValueError("Provide df or input_path")
         df = pd.read_csv(input_path)
 
+    if seed is not None:
+        random.seed(seed)
+
     df = df.copy()
     df = _ensure_list_col(df, "skills")
 
     if extra_pool is None:
-        extra_pool = ["Python", "C++", "Java", "MS Office", "Communication", "SQL", "Kubernetes", "React", "Figma"]
+        extra_pool = ["Python", "C++", "Java", "MS Office", "Communication",
+                      "SQL", "Kubernetes", "React", "Figma"]
 
     def _maybe_add(skills):
         if random.random() < add_prob:
@@ -197,70 +201,3 @@ def augment_skills(df: Optional[pd.DataFrame] = None,
         logging.info(f"Saved augmented skills dataset to {output_path}")
 
     return df
-
-
-# -----------------------------
-# CLI runner
-# -----------------------------
-def _parse_args():
-    p = argparse.ArgumentParser(description="Augmentation utilities")
-    p.add_argument("--action", choices=["rebalance_students", "rebalance_internships", "random_missing", "augment_skills", "all"], default="all")
-    p.add_argument("--input", type=str, default=None, help="Input CSV path (optional)")
-    p.add_argument("--output", type=str, default=None, help="Output CSV path (optional)")
-    p.add_argument("--frac", type=float, default=0.1, help="Fraction for missingness")
-    p.add_argument("--add_prob", type=float, default=0.25, help="Probability to add a skill")
-    return p.parse_args()
-
-
-def main():
-    args = _parse_args()
-    act = args.action
-
-    if act == "rebalance_students":
-        rebalance_students(input_path=args.input or DEFAULT_PROCESSED / "students_balanced.csv",
-                           output_path=args.output or DEFAULT_PROCESSED / "students_rebalanced.csv")
-    elif act == "rebalance_internships":
-        rebalance_internships(input_path=args.input or DEFAULT_RAW / "internships_.csv",
-                              output_path=args.output or DEFAULT_PROCESSED / "internships_rebalanced.csv",
-                              missing_frac=args.frac)
-    elif act == "random_missing":
-        random_missing(input_path=args.input or DEFAULT_PROCESSED / "students_cleaned.csv",
-                       output_path=args.output or DEFAULT_PROCESSED / "students_random_missing.csv",
-                       frac=args.frac)
-    elif act == "augment_skills":
-        augment_skills(input_path=args.input or DEFAULT_PROCESSED / "students_random_missing.csv",
-                       output_path=args.output or DEFAULT_PROCESSED / "students_augmented_skills.csv",
-                       add_prob=args.add_prob)
-    elif act == "all":
-        # default pipeline order (safe defaults)
-        s1 = rebalance_students(input_path=DEFAULT_PROCESSED / "students_balanced.csv",
-                                output_path=DEFAULT_PROCESSED / "students_rebalanced.csv")
-        s2 = random_missing(df=s1, frac=0.1)
-        s3 = augment_skills(df=s2, add_prob=0.25, output_path=DEFAULT_PROCESSED / "students_augmented_skills.csv")
-
-        rebalance_internships(input_path=DEFAULT_RAW / "internships_.csv",
-                              output_path=DEFAULT_PROCESSED / "internships_rebalanced.csv",
-                              missing_frac=0.05)
-
-        logging.info("Completed all augmentations (students + internships)")
-
-if __name__ == "__main__":
-    # Use cleaned datasets as input, not raw/processed duplicates
-    s1 = rebalance_students(
-        input_path=Path("ml_engine/data/cleaned/students_cleaned.csv"),
-        output_path=DEFAULT_PROCESSED / "students_rebalanced.csv"
-    )
-    s2 = random_missing(df=s1, frac=0.1)
-    s3 = augment_skills(
-        df=s2,
-        add_prob=0.25,
-        output_path=DEFAULT_PROCESSED / "students_augmented_skills.csv"
-    )
-
-    rebalance_internships(
-        input_path=Path("ml_engine/data/cleaned/internships_cleaned.csv"),
-        output_path=DEFAULT_PROCESSED / "internships_rebalanced.csv",
-        missing_frac=0.05
-    )
-
-    logging.info("Completed all augmentations (students + internships)")

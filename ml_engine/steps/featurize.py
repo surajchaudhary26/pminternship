@@ -5,12 +5,10 @@ Feature Engineering Module
 - parse_skills: safely parse skills fields into space-joined tokens
 - vectorize_skills: TF-IDF vectorizer (sparse)
 - compute_similarity: cosine similarity
-- match_students_to_internships: helper that returns top-k internship matches for each student
-- match_students_to_internships_with_gaps: extended version with skill-gap analysis
+- match_students_to_internships: baseline (skills-only)
+- match_students_to_internships_with_gaps: skills + missing gap analysis
+- match_students_to_internships_weighted: hybrid weighted model (skills + academics + preferences)
 - flatten_matches_df: utility to flatten nested matches into a clean CSV
-
-Usage:
-    from featurize import match_students_to_internships, match_students_to_internships_with_gaps
 """
 
 from typing import Tuple, List
@@ -78,7 +76,7 @@ def compute_similarity(vectors_a, vectors_b=None) -> np.ndarray:
 
 
 # -------------------------
-# Basic matching (as before)
+# 1. Baseline Matching
 # -------------------------
 def match_students_to_internships(students_df: pd.DataFrame,
                                   internships_df: pd.DataFrame,
@@ -118,7 +116,7 @@ def match_students_to_internships(students_df: pd.DataFrame,
 
 
 # -------------------------
-# Gap-analysis version
+# 2. Gap-analysis Matching
 # -------------------------
 def _safe_parse_list(value) -> List[str]:
     """Convert various list-like inputs into a Python list of strings."""
@@ -168,8 +166,6 @@ def match_students_to_internships_with_gaps(
 ) -> pd.DataFrame:
     """
     Extended matching: return top_k internships plus missing skills info.
-    Each top_matches is a list of dicts:
-    {job_id, score, missing_skills, missing_count, missing_pct}
     """
     s_df = students_df.copy().reset_index(drop=True)
     j_df = internships_df.copy().reset_index(drop=True)
@@ -226,9 +222,7 @@ def match_students_to_internships_with_gaps(
 
 
 def flatten_matches_df(matches_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Flatten nested matches (student_id + list of matches) into table form.
-    """
+    """Flatten nested matches into clean CSV table form."""
     rows = []
     for _, r in matches_df.iterrows():
         sid = r["student_id"]
@@ -238,28 +232,77 @@ def flatten_matches_df(matches_df: pd.DataFrame) -> pd.DataFrame:
                 "rank": rank,
                 "job_id": m["job_id"],
                 "score": m["score"],
-                "missing_skills": ";".join(m["missing_skills"]) if m["missing_skills"] else "",
-                "missing_count": m["missing_count"],
-                "missing_pct": m["missing_pct"],
+                "missing_skills": ";".join(m["missing_skills"]) if m.get("missing_skills") else "",
+                "missing_count": m.get("missing_count", ""),
+                "missing_pct": m.get("missing_pct", ""),
             })
     return pd.DataFrame(rows)
 
 
 # -------------------------
-# Quick demo
+# 3. Hybrid Weighted Matching
 # -------------------------
-if __name__ == "__main__":
-    try:
-        from ingest import load_data
-        from data_cleaning import clean_students, clean_internships
+def match_students_to_internships_weighted(
+    students_df: pd.DataFrame,
+    internships_df: pd.DataFrame,
+    top_k: int = 5,
+    weights: dict = None,
+    max_features: int = 5000
+) -> pd.DataFrame:
+    """
+    Hybrid matching with weighted score:
+    score = w1*skill_sim + w2*degree_match + w3*year_match + w4*preference_match
+    """
+    if weights is None:
+        weights = {"skills": 0.5, "degree": 0.2, "year": 0.1, "preferences": 0.2}
 
-        students_raw, internships_raw = load_data()
-        students = clean_students(students_raw)
-        internships = clean_internships(internships_raw)
+    s_df = students_df.copy().reset_index(drop=True)
+    j_df = internships_df.copy().reset_index(drop=True)
 
-        matches = match_students_to_internships_with_gaps(students, internships, top_k=3)
-        print(matches.head())
-        flat = flatten_matches_df(matches)
-        print(flat.head())
-    except Exception as e:
-        logging.error("Demo failed: %s", e)
+    # ---------- Skills Similarity ----------
+    s_text = parse_skills_column(s_df.get("skills", pd.Series([""] * len(s_df))))
+    j_text = parse_skills_column(j_df.get("skills_required", pd.Series([""] * len(j_df))))
+
+    combined = pd.concat([s_text, j_text], ignore_index=True)
+    vectors, _ = vectorize_skills(combined.tolist(), max_features=max_features)
+    s_vec, j_vec = vectors[:len(s_df)], vectors[len(s_df):]
+    skill_sim = cosine_similarity(s_vec, j_vec)
+
+    results = []
+    job_ids = list(j_df.get("job_id", j_df.index.astype(str)))
+    student_ids = list(s_df.get("student_id", s_df.index.astype(str)))
+
+    # ---------- Loop Students ----------
+    for i, sid in enumerate(student_ids):
+        sims = []
+        for j, jid in enumerate(job_ids):
+            score = 0.0
+
+            # skills
+            score += weights["skills"] * skill_sim[i, j]
+
+            # degree
+            if "degree" in s_df.columns and "degree_required" in j_df.columns:
+                if str(s_df.loc[i, "degree"]).lower() == str(j_df.loc[j, "degree_required"]).lower():
+                    score += weights["degree"]
+
+            # year
+            if "year" in s_df.columns and "min_year" in j_df.columns:
+                try:
+                    if int(s_df.loc[i, "year"]) >= int(j_df.loc[j, "min_year"]):
+                        score += weights["year"]
+                except Exception:
+                    pass
+
+            # preferences (location)
+            if "location_pref" in s_df.columns and "location" in j_df.columns:
+                if str(s_df.loc[i, "location_pref"]).lower() in str(j_df.loc[j, "location"]).lower():
+                    score += weights["preferences"]
+
+            sims.append((jid, round(score, 4)))
+
+        # Top K sort
+        top_matches = sorted(sims, key=lambda x: x[1], reverse=True)[:top_k]
+        results.append({"student_id": sid, "top_matches": top_matches})
+
+    return pd.DataFrame(results)

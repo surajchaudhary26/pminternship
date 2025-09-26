@@ -1,0 +1,17 @@
+paths:
+  cleaned_dir: "ml_engine/data/cleaned"
+  processed_dir: "ml_engine/data/processed"
+
+params:
+  top_k: 5
+  seed: 42
+
+augment:
+  enable: false          # agar default se augmentation chahiye to true kar dena
+  student_rebalance: true
+  internship_rebalance: true
+  missing_frac: 0.05
+  skill_add_prob: 0.25
+
+modes:
+  default: "baseline"    # options: baseline, gap, weighted
